@@ -89,7 +89,7 @@ function titleContext(
 }
 
 /** Register the extension. The timeout override is for offline lifecycle tests. */
-export function registerRename(pi: ExtensionAPI, timeoutMs = 30_000): void {
+export function registerRename(pi: ExtensionAPI, timeoutMs = 180_000): void {
   let state: State = { version: 1, attempted: false, titles: [] };
   let sessionId: string | undefined;
   let eligible = false;

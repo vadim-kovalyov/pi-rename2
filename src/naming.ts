@@ -26,7 +26,8 @@ export function namingPrompt(
   return [
     "For this temporary request, name the preceding session instead of continuing its work.",
     "Do not use tools, perform actions, or answer earlier requests. Output only one title.",
-    "Write a specific, useful English title in printable ASCII, at most 80 characters.",
+    "Write a specific, useful title in the main language used by the session, at most 80 characters.",
+    "For mixed-language sessions, use the language of the main task, not these instructions or metadata.",
     "Aim below 70 characters and use 5-10 words where useful, as a complete phrase.",
     "Describe the whole-session theme, not just the latest request.",
     "Name the concrete subject and goal, finding, question, or exploration topic.",
@@ -46,22 +47,21 @@ export function namingPrompt(
 
 export function generatedTitle(raw: string): string {
   let title = raw.trim().replace(/^(["'`])([\s\S]*)\1$/, "$2");
-  title = title.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
   title = title
-    .replace(/[\u2018\u2019]/g, "'")
-    .replace(/[\u201c\u201d]/g, '"')
-    .replace(/[\u2013\u2014]/g, "-");
-  title = title
-    .replace(/\s+/g, " ")
-    .replace(/[^\x20-\x7e]/g, "")
+    .normalize("NFC")
+    .replace(/\s+/gu, " ")
+    .replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/gu, "")
     .trim();
 
-  if (title.length > MAX_TITLE_LENGTH) {
-    const clipped = title.slice(0, MAX_TITLE_LENGTH);
+  const characters = Array.from(title);
+  if (characters.length > MAX_TITLE_LENGTH) {
+    const clipped = characters.slice(0, MAX_TITLE_LENGTH);
     const boundary = clipped.lastIndexOf(" ");
     title = (
-      boundary >= 40 && title[MAX_TITLE_LENGTH] !== " " ? clipped.slice(0, boundary) : clipped
-    ).trim();
+      boundary >= 40 && characters[MAX_TITLE_LENGTH] !== " " ? clipped.slice(0, boundary) : clipped
+    )
+      .join("")
+      .trim();
 
     // A hard limit must not leave a dangling connector from the omitted phrase.
     title = title
@@ -72,7 +72,7 @@ export function generatedTitle(raw: string): string {
       .replace(/[,:;\s-]+$/, "");
   }
 
-  if (!/[a-zA-Z0-9]/.test(title)) {
+  if (!/[\p{L}\p{N}]/u.test(title)) {
     throw new Error("invalid-title");
   }
 

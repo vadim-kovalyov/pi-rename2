@@ -60,7 +60,7 @@ type Call = {
 const instruction = (call: Call) => textContent(call.context.messages.at(-1)?.content);
 const requestText = (call: Call) => JSON.stringify(call.context.messages);
 
-function fixture(timeout = 1000) {
+function fixture(timeout?: number) {
   const sm = SessionManager.inMemory("/sample-project");
   const events = new Map<string, EventHandler>();
   const notices: { text: string; kind: string }[] = [];
@@ -369,6 +369,48 @@ test("timeout preserves title even when provider ignores abort", async () => {
   await tick();
   assert.equal(f.sm.getSessionName(), "Keep title");
   assert.equal(f.statuses.at(-1), undefined);
+});
+
+test("default naming deadline allows 180 seconds for slower models", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fixture();
+  await f.start();
+  f.user();
+  f.reply();
+  f.api.setSessionName("Keep title");
+  const pending = deferred<ReturnType<typeof assistant>>();
+  f.setNext(() => pending.promise);
+  const run = f.rename();
+
+  t.mock.timers.tick(30_000);
+  await tick();
+  assert.equal(f.notices.length, 0);
+  assert.equal(f.calls[0]!.options.signal.aborted, false);
+
+  t.mock.timers.tick(149_999);
+  await tick();
+  assert.equal(f.calls[0]!.options.signal.aborted, false);
+
+  t.mock.timers.tick(1);
+  await run;
+  assert.equal(f.calls[0]!.options.signal.aborted, true);
+  assert.equal(f.sm.getSessionName(), "Keep title");
+  assert.match(f.notices.at(-1)!.text, /timed out/);
+});
+
+test("AI titles retain non-Latin text in the name and rename history", async () => {
+  const f = fixture();
+  await f.start();
+  const title = "\u6392\u67e5\u91cd\u590d\u6ce8\u518c";
+  f.user(title);
+  f.setNext(async () => assistant(title));
+  await f.rename();
+  assert.equal(f.sm.getSessionName(), title);
+
+  await f.rename();
+  const metadata = JSON.parse(instruction(f.calls[1]!).split("\n").at(-1)!);
+  assert.equal(metadata.currentTitle, title);
+  assert.deepEqual(metadata.previousTitles, [title]);
 });
 
 test("newest request wins and manual naming invalidates pending work", async () => {
