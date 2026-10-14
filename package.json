@@ -1,0 +1,48 @@
+{
+  "name": "pi-rename2",
+  "version": "0.1.0",
+  "description": "Specific session titles for Pi: automatic naming and /rename.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vadim-kovalyov/pi-rename2.git"
+  },
+  "homepage": "https://github.com/vadim-kovalyov/pi-rename2#readme",
+  "bugs": "https://github.com/vadim-kovalyov/pi-rename2/issues",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "session",
+    "rename"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/extension.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "check": "npm run typecheck && npm run lint && npm test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
+  }
+}
