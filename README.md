@@ -13,31 +13,18 @@ Specific session titles for [Pi](https://pi.dev). Name a new session automatical
 | --- | --- |
 | `/rename` | Generate and save a title immediately. |
 | `/rename <title>` | Save your exact title without calling a model. |
-| `/name` | Pi's built-in command; unchanged by this extension. |
 
-Examples of generated titles:
-
-```text
-Device controller: investigate duplicate discovery
-Session naming: design automatic title generation
-Compare cancellation patterns for background workers
-```
-
-Titles are English, single-line ASCII, usually 5-10 words, and at most 80 characters. A project prefix appears only when the conversation supports it. Investigations should not be labeled as completed fixes.
+Titles are English, single-line ASCII, usually 5-10 words, and at most 80 characters. A project prefix appears only when the conversation supports it.
 
 Run `/rename` again to ask for a meaningfully different title. Each call makes one model request and includes the current title and up to five recent generated titles as examples to avoid. A model can still return the same title. There are no automatic retries and no cross-session uniqueness check.
-
-Literal titles keep your wording and are not subject to the AI length limit. Surrounding whitespace is trimmed. Control characters and line breaks are rejected. Whitespace alone invokes AI naming.
 
 ## Automatic naming
 
 In Pi's interactive terminal UI, a fresh unnamed session gets a title after its first completed user-triggered agent run. Naming runs in the background, so it does not hold up the main reply or add another agent turn.
 
-Automatic naming does not replace an existing title, rename a resumed conversation, run again after reload, or run in RPC, print, or JSON mode. Forked and cloned conversations are not treated as fresh sessions. Ordinary noninteractive subagents are therefore excluded too.
+Automatic naming does not replace an existing title, rename a resumed conversation, run again after reload, or run in RPC, print, or JSON mode. Forked and cloned conversations are not treated as fresh sessions. Ordinary noninteractive subagents are excluded too.
 
-The extension makes one automatic attempt. If that attempt fails, the title stays unchanged; run `/rename` to try again. Aborted or failed main replies do not trigger naming until a completed reply is available.
-
-A manual title change cancels pending naming work. A newer `/rename` supersedes an older one. Session changes, tree navigation, reload, and shutdown also cancel pending work. An explicit AI rename submitted while the agent is busy waits for that run to finish before selecting conversation context.
+The extension makes one automatic attempt. If that attempt fails, the title stays unchanged; run `/rename` to try again.
 
 ## Try it without installing
 
@@ -83,18 +70,23 @@ For Git or local installations, pass the same source used for installation to `p
 
 ## Privacy and model cost
 
-Naming sends a separate request to the same selected model and configured provider as the session. It uses Pi's authentication and provider routing. It does not ask another provider, repair credentials, or fall back to another model.
+Naming sends a separate request to the same selected model and configured provider as the session. It uses Pi's authentication and provider routing.
 
-Input contains:
+Naming is an isolated continuation of Pi's current projected context, not a new chat containing a flattened summary. The request preserves the structured transcript and appends a temporary instruction to output only a title. The instruction also includes the working-directory basename, current title, and up to five recent generated titles.
 
-- User and assistant text from the active conversation projection.
-- Compaction summaries, honoring context edits and omissions.
-- The working-directory basename as an optional hint, not the full path.
-- The current title and up to five recent generated titles.
+The snapshot includes the system instructions and tool declarations stored in the transcript, user/assistant messages, tool calls and results, images, model-visible extension messages, and provider reasoning/signature blocks already present in the projected context. Pi's normal message conversion preserves compaction and branch summaries. Context edits and omissions are honored; separate abandoned branches and history replaced by compaction are not restored.
 
-It excludes system instructions, hidden reasoning, raw tool calls and results, images, custom extension messages, and separate abandoned branches. A retained compaction summary may still describe earlier work. Chat text and summaries may contain sensitive information even when tool output is excluded.
+This is broader input than a chat-text-only summary. Tool output, images, system instructions, and retained summaries may contain sensitive information. The snapshot is Pi's session projection. Request-only transformations from other extensions or settings are not replayed by this direct request. Do not rely on a main-request-only redaction/filter hook to sanitize naming requests.
 
-Conversation excerpts are capped at 24,000 characters. Long inputs retain opening context, selected middle text or compaction summaries, and recent text in chronological order, with omissions marked. Selecting excerpts can miss details; a title is not a complete session summary.
+### Prompt-cache reuse
+
+The request keeps the original message order, system checkpoints, tool schemas, and session cache identifier. Only the final naming instruction is new. For older imported sessions without a stored system checkpoint, it prepends Pi's current system prompt as a fallback. The extension no longer requests `cacheRetention: "none"`; Pi's provider default and environment cache settings apply.
+
+Keeping that prefix and cache identity gives providers an opportunity to reuse an existing prompt/KV cache. It does not guarantee a cache hit: support, cache lifetime, routing, reasoning settings, and request-time transformations can affect reuse. The newest assistant reply may not yet be cached as input. Cached input can still cost money, and a cold cache requires processing the full request. The title call uses minimal reasoning to keep generation small, which may reduce reuse on providers whose caches depend on reasoning settings.
+
+For providers that support transport selection, the title request uses SSE so it does not branch a stateful WebSocket connection used by the main conversation. Tool schemas remain available for prefix compatibility, but the extension never executes tools or starts an agent loop. A tool-call response is rejected, even if it also contains text.
+
+The snapshot is deep-copied in memory. The temporary instruction and generated reply are never appended to the conversation, and no session clone is written to disk. Only the accepted title and small naming metadata are persisted.
 
 There is no telemetry, external title service, repository scan, or search through other sessions. Project names from your own conversation can appear in its runtime title. The published code and tests use only synthetic examples.
 
@@ -102,7 +94,7 @@ Titles and small extension metadata are saved through Pi's session APIs. Metadat
 
 ## Failure handling
 
-The naming request has a 30-second deadline. Timeouts, unavailable credentials, provider errors, and unusable titles leave the old title intact. Errors are brief and do not expose raw provider responses. The transient status is cleared when work finishes or is cancelled.
+The naming request has a 30-second deadline. Timeouts, unavailable credentials, insufficient context space, provider errors, tool requests, and incomplete or unusable titles leave the old title intact. Errors are brief and do not expose raw provider responses. The transient status is cleared when work finishes or is cancelled.
 
 If naming fails:
 
@@ -110,7 +102,7 @@ If naming fails:
 2. Resolve sign-in or provider access through Pi's normal controls.
 3. Run `/rename`, or use `/rename <title>` without a model call.
 
-An empty or image-only conversation may not contain enough text to name. Literal titles still work.
+An empty conversation cannot be named from context. Literal titles still work without a model request or available context space.
 
 ## Development
 
@@ -121,7 +113,7 @@ npm run check
 
 `npm run check` runs strict TypeScript checks, Biome, and offline tests. `npm run format` applies formatting and safe lint fixes.
 
-Tests use synthetic conversations and mocked model responses. They also exercise Pi's real session projection and load the extension through Pi's actual resource loader with isolated settings. They do not load your personal agent settings or make provider requests.
+Tests use synthetic conversations and mocked model responses. They exercise Pi's real session projection, load the extension through Pi's resource loader, and run an isolated SDK session with an intercepted model runtime. The SDK test verifies that ordinary and naming requests share the same structured prefix and cache identity without changing the live conversation. Tests do not load your personal agent settings or contact providers. Actual cache-hit rates and latency require separate, explicitly approved live testing.
 
 The implementation has two small parts:
 

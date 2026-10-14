@@ -1,18 +1,13 @@
-import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
-import type {
-  ExtensionAPI,
-  ExtensionCommandContext,
-  ExtensionContext,
-  SessionEntry,
-} from "@earendil-works/pi-coding-agent";
 import {
-  conversationText,
-  generatedTitle,
-  literalTitle,
-  namingPrompt,
-  textContent,
-} from "./naming.ts";
+  convertToLlm,
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type ExtensionContext,
+  estimateTokens,
+  type SessionEntry,
+} from "@earendil-works/pi-coding-agent";
+import { generatedTitle, literalTitle, namingPrompt, textContent } from "./naming.ts";
 
 const STATE_KEY = "pi-rename2";
 const STATUS_KEY = "pi-rename2";
@@ -53,6 +48,44 @@ function restore(entries: readonly SessionEntry[]): State {
   }
 
   return { version: 1, attempted: false, titles: [] };
+}
+
+/** Build an isolated continuation of Pi's effective, already-compacted transcript. */
+function titleContext(
+  ctx: ExtensionContext,
+  model: { contextWindow: number; maxTokens: number },
+  current: string | undefined,
+  history: readonly string[],
+) {
+  const projected = ctx.sessionManager.buildSessionProjection().messages;
+  const converted = convertToLlm(projected);
+  if (!converted.some((message) => message.role !== "system")) {
+    throw new Error("no-conversation");
+  }
+
+  // Providers may normalize messages in place. Never lend them live session objects.
+  const messages = structuredClone(converted);
+  if (!messages.some((message) => message.role === "system")) {
+    // Older imported sessions may not yet contain Pi's persisted system checkpoint.
+    messages.unshift({ role: "system", content: ctx.getSystemPrompt(), timestamp: Date.now() });
+  }
+
+  const instruction = {
+    role: "user" as const,
+    content: namingPrompt(current, history, basename(ctx.cwd)),
+    timestamp: Date.now(),
+  };
+  const maxTokens = Math.min(256, model.maxTokens);
+  const contextTokens =
+    ctx.getContextUsage()?.tokens ??
+    messages.reduce((total, message) => total + estimateTokens(message), 0);
+  // Pi's estimate is not a provider tokenizer. Do not silently truncate or compact.
+  if (contextTokens + estimateTokens(instruction) + maxTokens + 32 > model.contextWindow) {
+    throw new Error("context-limit");
+  }
+
+  messages.push(instruction);
+  return { messages, maxTokens };
 }
 
 /** Register the extension. The timeout override is for offline lifecycle tests. */
@@ -119,11 +152,7 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 30_000): void {
         throw new Error("no-auth");
       }
 
-      const conversation = conversationText(ctx.sessionManager.buildSessionProjection().messages);
-      if (!conversation) {
-        throw new Error("no-conversation");
-      }
-      const prompt = namingPrompt(conversation, startingTitle, state.titles, basename(ctx.cwd));
+      const context = titleContext(ctx, model, startingTitle, state.titles);
 
       const aborted = new Promise<never>((_resolve, reject) => {
         const listener = () => reject(new Error(timedOut ? "timeout" : "cancelled"));
@@ -139,16 +168,14 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 30_000): void {
         ctx.modelRegistry
           .streamSimple(
             model,
-            {
-              systemPrompt: prompt.systemPrompt,
-              messages: [{ role: "user", content: prompt.input, timestamp: Date.now() }],
-            },
+            { messages: context.messages },
             {
               signal: controller.signal,
               reasoning: "minimal",
-              maxTokens: 256,
-              cacheRetention: "none",
-              sessionId: randomUUID(),
+              maxTokens: context.maxTokens,
+              sessionId: ctx.sessionManager.getSessionId(),
+              // Keep cache affinity, but do not branch a live stateful WebSocket connection.
+              transport: "sse",
             },
           )
           .result(),
@@ -160,6 +187,15 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 30_000): void {
       }
       if (response.stopReason === "error" || response.stopReason === "aborted") {
         throw new Error("provider");
+      }
+      if (
+        response.stopReason === "toolUse" ||
+        response.content.some((block) => block.type === "toolCall")
+      ) {
+        throw new Error("unexpected-tools");
+      }
+      if (response.stopReason === "length") {
+        throw new Error("incomplete-title");
       }
       const title = generatedTitle(textContent(response.content));
 
@@ -187,7 +223,13 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 30_000): void {
         "no-auth":
           "The selected model has no configured authentication. Sign in, then run /rename.",
         "no-conversation":
-          "No conversation text is available to name. Use /rename <title> instead.",
+          "No conversation context is available to name. Use /rename <title> instead.",
+        "context-limit":
+          "The session needs more context space for a title request. Use /compact, then /rename, or supply a title.",
+        "unexpected-tools":
+          "The model requested tools instead of a title. No tools were executed. Run /rename again or supply a title.",
+        "incomplete-title":
+          "The model ran out of output space for a complete title. Run /rename again or supply a title.",
         "invalid-title": "The model returned no usable title. Run /rename again or supply a title.",
         timeout: "Session naming timed out. Run /rename to try again.",
       };
