@@ -12,9 +12,9 @@ There are no model-callable tools, provider registrations, settings dialogs, mod
 
 ## 2. Package and module contracts
 
-- Package name/version: `pi-rename2`, `0.1.0`; ESM; MIT license.
-- Runtime baseline: Node.js `>=22.19.0`; tested host API: `@earendil-works/pi-coding-agent@1.2.0`.
-- Declare that host as a peer dependency with range `*`; this is not a guarantee that every host version is compatible.
+- Package name/version: `pi-rename2`, `0.1.1`; ESM; MIT license.
+- Runtime baseline: Node.js `>=22.19.0`; minimum and tested host API: `@earendil-works/pi-coding-agent@1.5.0`.
+- Declare that host as a peer dependency with range `>=1.5.0`; this is not a guarantee that every later host version is compatible.
 - Runtime imports use Node built-ins and Pi's supplied coding-agent module. There are no bundled runtime dependencies or build output.
 - Package keyword: `pi-package`. Manifest entry: `pi.extensions = ["./src/extension.ts"]`.
 - npm file allowlist: `src/`, `README.md`, `LICENSE`. This specification is a repository document, outside that allowlist.
@@ -270,7 +270,7 @@ Keep these exact development dependencies and a lockfile:
 
 | Dependency | Version |
 | --- | --- |
-| `@earendil-works/pi-coding-agent` | `1.2.0` |
+| `@earendil-works/pi-coding-agent` | `1.5.0` |
 | `@biomejs/biome` | `2.5.15` |
 | `@types/node` | `24.19.2` |
 | `typescript` | `7.0.2` |

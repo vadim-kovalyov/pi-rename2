@@ -28,7 +28,7 @@ The extension makes one automatic attempt. If that attempt fails, the title stay
 
 ## Try it without installing
 
-Requires Node.js 22.19 or later and Pi 1.2.0 or later. Tested with Pi 1.2.0; older package namespaces are not supported.
+Requires Node.js 22.19 or later and Pi 1.5.0 or later. Tested with Pi 1.5.0; older package namespaces are not supported.
 
 From a local checkout:
 

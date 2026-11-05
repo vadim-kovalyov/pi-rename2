@@ -1,6 +1,6 @@
 {
   "name": "pi-rename2",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Specific session titles for Pi: automatic naming and /rename.",
   "type": "module",
   "license": "MIT",
@@ -30,7 +30,7 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": ">=1.5.0"
   },
   "scripts": {
     "test": "node --disable-warning=ExperimentalWarning --test test/*.test.ts",
@@ -41,7 +41,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
-    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
     "@types/node": "24.19.2",
     "typescript": "7.0.2"
   }
