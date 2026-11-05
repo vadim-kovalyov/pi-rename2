@@ -180,7 +180,7 @@ Before accepting a response, recheck request validity and require the current se
 
 Reject responses in this order:
 
-1. Stop reason `error` or `aborted`: generic provider failure.
+1. Stop reason `error` or `aborted`: provider failure with a privacy-safe diagnostic summary.
 2. Stop reason `toolUse`, or any content block of type `toolCall`, including responses that also contain text: unexpected-tools warning.
 3. Stop reason `length`: incomplete-title warning.
 
@@ -259,6 +259,10 @@ Warning text:
 | Failure while waiting for idle | `Could not wait for the session to become idle. Run /rename again.` |
 
 Failures preserve the existing title; explicit commands may already have persisted `attempted = true`. Do not display raw provider errors, credentials, headers, or conversation excerpts. Without UI, preserve the same command/state behavior while emitting no notifications or status. There is no telemetry, external title service, or additional history collection.
+
+Generation warnings append a `Rename diagnostics:` line. Include the failure stage (`preflight`, `request`, `provider-response`, `validation`, or `save`). After context preflight succeeds, include the requested `reasoning=minimal`, actual extension output limit, and `transport=sse`. These are extension options, not the final provider payload. When a response is available, include an allowlisted stop reason (or `unknown`) and counts of text and thinking blocks. Do not include block contents, model/provider identifiers, or endpoint URLs.
+
+For request exceptions and provider error responses, privately inspect the error to emit only a fixed hint (`reasoning-option`, `context-limit`, `chat-template`, `authentication`, `rate-limit`, `connection`, `server-error`, `request-rejected`, or `unknown`) and a validated HTTP error status when available. Hints are pattern matches, not proof of the root cause. Do not display or persist error excerpts, stacks, arbitrary error fields, or raw response metadata. Do not write diagnostic files or extra session entries. Distinguish internal failure codes from provider error strings so external errors cannot masquerade as preflight failures. Keep request options, retries, deadlines, and cancellation behavior unchanged.
 
 ## 9. Development and verification
 

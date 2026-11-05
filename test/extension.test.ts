@@ -322,6 +322,85 @@ test("provider failure is sanitized, preserves title, clears status, and never a
   assert.equal(f.sm.getSessionName(), "Existing title");
 });
 
+test("failure diagnostics distinguish thrown requests from provider error responses", async (t) => {
+  for (const source of ["request", "provider-response"] as const) {
+    await t.test(source, async () => {
+      const f = fixture();
+      await f.start();
+      f.user("PRIVATE_CONVERSATION");
+      f.api.setSessionName("Keep title");
+      const message = "400 unsupported reasoning_effort: minimal PRIVATE_TOKEN";
+      f.setNext(async () => {
+        if (source === "request") {
+          throw Object.assign(new Error(message), { status: 400 });
+        }
+        return { ...assistant("PRIVATE_OUTPUT", "error"), errorMessage: message };
+      });
+      await f.rename();
+      const warning = f.notices.at(-1)!.text;
+      assert.match(warning, new RegExp(`stage=${source}`));
+      assert.match(warning, /hint=reasoning-option/);
+      assert.match(warning, /http=400/);
+      assert.match(warning, /reasoning=minimal; maxTokens=256; transport=sse/);
+      assert.doesNotMatch(warning, /PRIVATE_|unsupported reasoning_effort/);
+      assert.equal(f.sm.getSessionName(), "Keep title");
+      assert.equal(f.calls.length, 1);
+      assert.equal(f.statuses.at(-1), undefined);
+      assert.doesNotMatch(JSON.stringify(f.sm.getBranch()), /PRIVATE_TOKEN|PRIVATE_OUTPUT/);
+    });
+  }
+});
+
+test("length diagnostics report thinking without exposing generated content", async () => {
+  const f = fixture();
+  await f.start();
+  f.user();
+  f.setNext(async () => ({
+    ...assistant("", "length"),
+    content: [{ type: "thinking", thinking: "PRIVATE_REASONING" }],
+  }));
+  await f.rename();
+  const warning = f.notices.at(-1)!.text;
+  assert.match(warning, /ran out of output space/);
+  assert.match(warning, /stage=validation/);
+  assert.match(warning, /stop=length; textBlocks=0; thinkingBlocks=1/);
+  assert.doesNotMatch(warning, /PRIVATE_REASONING/);
+});
+
+test("synchronous request failures get diagnostics and non-UI failures stay silent", async () => {
+  const f = fixture();
+  await f.start();
+  f.user();
+  f.setOnRequest(() => {
+    throw new Error("fetch failed", { cause: { code: "ECONNREFUSED" } });
+  });
+  await f.rename();
+  assert.match(f.notices.at(-1)!.text, /stage=request; hint=connection/);
+  assert.equal(f.statuses.at(-1), undefined);
+
+  f.ctx.hasUI = false;
+  f.notices.length = 0;
+  f.statuses.length = 0;
+  await f.rename();
+  assert.deepEqual(f.notices, []);
+  assert.deepEqual(f.statuses, []);
+  assert.equal(f.calls.length, 2);
+});
+
+test("unknown provider errors cannot impersonate internal failures", async () => {
+  const f = fixture();
+  await f.start();
+  f.user();
+  f.setNext(async () => {
+    throw new Error("no-auth");
+  });
+  await f.rename();
+  const warning = f.notices.at(-1)!.text;
+  assert.match(warning, /Session naming failed/);
+  assert.match(warning, /stage=request; hint=unknown/);
+  assert.doesNotMatch(warning, /Sign in/);
+});
+
 test("missing model, auth, conversation, invalid output, and provider error are safe", async (t) => {
   for (const problem of ["model", "auth", "conversation", "invalid", "error", "aborted"] as const) {
     await t.test(problem, async () => {

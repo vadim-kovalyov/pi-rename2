@@ -84,7 +84,19 @@ Cache hits are not guaranteed. Provider support, expiry, routing, reasoning sett
 
 ## Failure handling
 
-The naming request has a 180-second deadline. Timeouts, unavailable credentials, insufficient context space, provider errors, tool requests, and incomplete or unusable titles leave the old title intact. Errors are brief and do not expose raw provider responses. The transient status is cleared when work finishes or is cancelled.
+The naming request has a 180-second deadline. Timeouts, unavailable credentials, insufficient context space, provider errors, tool requests, and incomplete or unusable titles leave the old title intact. Warnings include a privacy-safe diagnostic summary, not raw provider responses. The transient status is cleared when work finishes or is cancelled.
+
+The summary reports the failure stage (`preflight`, `request`, `provider-response`, `validation`, or `save`). After preflight succeeds, it also reports the requested reasoning level, output limit, and transport. When a response is available, it includes the stop reason and counts of text and thinking blocks. These are extension-level settings, not a capture of the final HTTP payload; Pi may map them for the selected provider.
+
+Request exceptions and provider error responses include a fixed error hint and an HTTP error status when available. Hints cover reasoning options, context limits, chat templates, authentication, rate limits, connection errors, and server errors. Hints are based on error patterns, not confirmed root causes. Unknown errors stay `hint=unknown`; check the server log for the exact error.
+
+For example, an error mentioning an unsupported reasoning option may produce:
+
+```text
+Rename diagnostics: stage=provider-response; hint=reasoning-option; http=400; reasoning=minimal; maxTokens=256; transport=sse; stop=error; textBlocks=0; thinkingBlocks=0.
+```
+
+Diagnostics do not display or save raw errors, credentials, headers, endpoint URLs, model identifiers, conversation excerpts, or generated text/reasoning. No diagnostic files or extra session entries are written.
 
 If naming fails:
 
@@ -105,10 +117,11 @@ npm run check
 
 Tests use synthetic conversations and mocked model responses, including Pi session and cache-prefix checks. They do not read your personal settings or contact providers.
 
-The implementation has two small parts:
+The implementation has three small parts:
 
 - `src/naming.ts`: title instructions and validation.
 - `src/extension.ts`: context snapshots, Pi commands, lifecycle hooks, and persistence.
+- `src/diagnostics.ts`: privacy-safe failure summaries and error hints.
 
 CI runs the same checks on Node.js 22 and 24. It does not publish packages or need provider secrets.
 

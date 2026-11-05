@@ -7,10 +7,13 @@ import {
   estimateTokens,
   type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
+import { type FailureStage, failureDiagnostics } from "./diagnostics.ts";
 import { generatedTitle, literalTitle, namingPrompt, textContent } from "./naming.ts";
 
 const STATE_KEY = "pi-rename2";
 const STATUS_KEY = "pi-rename2";
+
+class NamingFailure extends Error {}
 
 interface State {
   version: 1;
@@ -60,7 +63,7 @@ function titleContext(
   const projected = ctx.sessionManager.buildSessionProjection().messages;
   const converted = convertToLlm(projected);
   if (!converted.some((message) => message.role !== "system")) {
-    throw new Error("no-conversation");
+    throw new NamingFailure("no-conversation");
   }
 
   // Providers may normalize messages in place. Never lend them live session objects.
@@ -81,7 +84,7 @@ function titleContext(
     messages.reduce((total, message) => total + estimateTokens(message), 0);
   // Pi's estimate is not a provider tokenizer. Do not silently truncate or compact.
   if (contextTokens + estimateTokens(instruction) + maxTokens + 32 > model.contextWindow) {
-    throw new Error("context-limit");
+    throw new NamingFailure("context-limit");
   }
 
   messages.push(instruction);
@@ -135,6 +138,10 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 180_000): void {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let releaseAbort: (() => void) | undefined;
     let timedOut = false;
+    let stage: FailureStage = "preflight";
+    let maxTokens: number | undefined;
+    let responseSummary: Parameters<typeof failureDiagnostics>[3];
+    let providerError: unknown;
 
     try {
       if (!valid(request)) {
@@ -146,16 +153,17 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 180_000): void {
 
       const model = ctx.model;
       if (!model) {
-        throw new Error("no-model");
+        throw new NamingFailure("no-model");
       }
       if (!ctx.modelRegistry.hasConfiguredAuth(model)) {
-        throw new Error("no-auth");
+        throw new NamingFailure("no-auth");
       }
 
       const context = titleContext(ctx, model, startingTitle, state.titles);
+      maxTokens = context.maxTokens;
 
       const aborted = new Promise<never>((_resolve, reject) => {
-        const listener = () => reject(new Error(timedOut ? "timeout" : "cancelled"));
+        const listener = () => reject(new NamingFailure(timedOut ? "timeout" : "cancelled"));
         controller.signal.addEventListener("abort", listener, { once: true });
         releaseAbort = () => controller.signal.removeEventListener("abort", listener);
       });
@@ -164,6 +172,7 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 180_000): void {
         controller.abort();
       }, timeoutMs);
 
+      stage = "request";
       const response = await Promise.race([
         ctx.modelRegistry
           .streamSimple(
@@ -185,20 +194,25 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 180_000): void {
       if (!valid(request) || pi.getSessionName() !== startingTitle) {
         return;
       }
+      responseSummary = response;
+      stage = "provider-response";
       if (response.stopReason === "error" || response.stopReason === "aborted") {
-        throw new Error("provider");
+        providerError = response.errorMessage;
+        throw new NamingFailure("provider");
       }
+      stage = "validation";
       if (
         response.stopReason === "toolUse" ||
         response.content.some((block) => block.type === "toolCall")
       ) {
-        throw new Error("unexpected-tools");
+        throw new NamingFailure("unexpected-tools");
       }
       if (response.stopReason === "length") {
-        throw new Error("incomplete-title");
+        throw new NamingFailure("incomplete-title");
       }
       const title = generatedTitle(textContent(response.content));
 
+      stage = "save";
       // Metadata is written before setting the name, whose change event cancels requests.
       state.titles = [...state.titles, title].slice(-5);
       save();
@@ -217,7 +231,10 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 180_000): void {
         return;
       }
 
-      const code = error instanceof Error ? error.message : "provider";
+      const code =
+        error instanceof NamingFailure || (stage === "validation" && error instanceof Error)
+          ? error.message
+          : "provider";
       const messages: Record<string, string> = {
         "no-model": "No session model selected. Select a model, then run /rename.",
         "no-auth":
@@ -233,14 +250,16 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 180_000): void {
         "invalid-title": "The model returned no usable title. Run /rename again or supply a title.",
         timeout: "Session naming timed out. Run /rename to try again.",
       };
-      notify(
-        ctx,
-        timedOut
-          ? messages.timeout!
-          : (messages[code] ??
-              "Session naming failed. Check model access, then run /rename again."),
-        "warning",
+      const message = timedOut
+        ? messages.timeout!
+        : (messages[code] ?? "Session naming failed. Check model access, then run /rename again.");
+      const diagnostics = failureDiagnostics(
+        stage,
+        providerError ?? error,
+        maxTokens,
+        responseSummary,
       );
+      notify(ctx, `${message}\n${diagnostics}`, "warning");
     } finally {
       if (timer) {
         clearTimeout(timer);
