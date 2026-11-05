@@ -12,8 +12,52 @@ import { generatedTitle, literalTitle, namingPrompt, textContent } from "./namin
 
 const STATE_KEY = "pi-rename2";
 const STATUS_KEY = "pi-rename2";
+const MAX_OUTPUT_TOKENS = 256;
+// Headroom for request framing that Pi's token estimate does not count.
+const BUDGET_MARGIN_TOKENS = 32;
+const HISTORY_SIZE = 5;
 
-class NamingFailure extends Error {}
+type Model = NonNullable<ExtensionContext["model"]>;
+type Messages = ReturnType<typeof convertToLlm>;
+type ModelResponse = Awaited<
+  ReturnType<ReturnType<ExtensionContext["modelRegistry"]["streamSimple"]>["result"]>
+>;
+
+type FailureCode =
+  | "no-model"
+  | "no-auth"
+  | "no-conversation"
+  | "context-limit"
+  | "unexpected-tools"
+  | "incomplete-title"
+  | "invalid-title"
+  | "timeout"
+  | "provider";
+
+const FAILURE_MESSAGES: Record<FailureCode, string> = {
+  "no-model": "No session model selected. Select a model, then run /rename.",
+  "no-auth": "The selected model has no configured authentication. Sign in, then run /rename.",
+  "no-conversation": "No conversation context is available to name. Use /rename <title> instead.",
+  "context-limit":
+    "The session needs more context space for a title request. Use /compact, then /rename, or supply a title.",
+  "unexpected-tools":
+    "The model requested tools instead of a title. No tools were executed. Run /rename again or supply a title.",
+  "incomplete-title":
+    "The model ran out of output space for a complete title. Run /rename again or supply a title.",
+  "invalid-title": "The model returned no usable title. Run /rename again or supply a title.",
+  timeout: "Session naming timed out. Run /rename to try again.",
+  provider: "Session naming failed. Check model access, then run /rename again.",
+};
+
+/** Internal failure with a known code. Provider errors never use this class. */
+class NamingFailure extends Error {
+  readonly code: FailureCode;
+
+  constructor(code: FailureCode) {
+    super(code);
+    this.code = code;
+  }
+}
 
 interface State {
   version: 1;
@@ -22,9 +66,9 @@ interface State {
 }
 
 interface Request {
-  id: number;
   controller: AbortController;
   ctx: ExtensionContext;
+  timedOut: boolean;
 }
 
 function restore(entries: readonly SessionEntry[]): State {
@@ -45,7 +89,7 @@ function restore(entries: readonly SessionEntry[]): State {
         attempted: value.attempted,
         titles: value.titles
           .filter((title): title is string => typeof title === "string")
-          .slice(-5),
+          .slice(-HISTORY_SIZE),
       };
     }
   }
@@ -56,12 +100,11 @@ function restore(entries: readonly SessionEntry[]): State {
 /** Build an isolated continuation of Pi's effective, already-compacted transcript. */
 function titleContext(
   ctx: ExtensionContext,
-  model: { contextWindow: number; maxTokens: number },
+  model: Model,
   current: string | undefined,
   history: readonly string[],
-) {
-  const projected = ctx.sessionManager.buildSessionProjection().messages;
-  const converted = convertToLlm(projected);
+): { messages: Messages; maxTokens: number } {
+  const converted = convertToLlm(ctx.sessionManager.buildSessionProjection().messages);
   if (!converted.some((message) => message.role !== "system")) {
     throw new NamingFailure("no-conversation");
   }
@@ -78,12 +121,13 @@ function titleContext(
     content: namingPrompt(current, history, basename(ctx.cwd)),
     timestamp: Date.now(),
   };
-  const maxTokens = Math.min(256, model.maxTokens);
+  const maxTokens = Math.min(MAX_OUTPUT_TOKENS, model.maxTokens);
   const contextTokens =
     ctx.getContextUsage()?.tokens ??
     messages.reduce((total, message) => total + estimateTokens(message), 0);
+  const required = contextTokens + estimateTokens(instruction) + maxTokens + BUDGET_MARGIN_TOKENS;
   // Pi's estimate is not a provider tokenizer. Do not silently truncate or compact.
-  if (contextTokens + estimateTokens(instruction) + maxTokens + 32 > model.contextWindow) {
+  if (required > model.contextWindow) {
     throw new NamingFailure("context-limit");
   }
 
@@ -91,13 +135,94 @@ function titleContext(
   return { messages, maxTokens };
 }
 
+/** Call the model once. Rejects on abort even if the provider ignores the signal. */
+async function callModel(
+  request: Request,
+  model: Model,
+  context: { messages: Messages; maxTokens: number },
+  timeoutMs: number,
+): Promise<ModelResponse> {
+  const { ctx, controller } = request;
+  let releaseAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const listener = () => reject(new Error("aborted"));
+    controller.signal.addEventListener("abort", listener, { once: true });
+    releaseAbort = () => controller.signal.removeEventListener("abort", listener);
+  });
+  const timer = setTimeout(() => {
+    request.timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    const stream = ctx.modelRegistry.streamSimple(
+      model,
+      { messages: context.messages },
+      {
+        signal: controller.signal,
+        reasoning: "minimal",
+        maxTokens: context.maxTokens,
+        sessionId: ctx.sessionManager.getSessionId(),
+        // Keep cache affinity, but do not branch a live stateful WebSocket connection.
+        transport: "sse",
+      },
+    );
+    return await Promise.race([stream.result(), aborted]);
+  } finally {
+    clearTimeout(timer);
+    releaseAbort?.();
+  }
+}
+
+/** Turn an accepted model response into a title, or throw a known failure. */
+function titleFrom(response: ModelResponse): string {
+  if (
+    response.stopReason === "toolUse" ||
+    response.content.some((block) => block.type === "toolCall")
+  ) {
+    throw new NamingFailure("unexpected-tools");
+  }
+  if (response.stopReason === "length") {
+    throw new NamingFailure("incomplete-title");
+  }
+
+  const title = generatedTitle(textContent(response.content));
+  if (!title) {
+    throw new NamingFailure("invalid-title");
+  }
+  return title;
+}
+
+const isProviderError = (response: ModelResponse) =>
+  response.stopReason === "error" || response.stopReason === "aborted";
+
+/** Build a user-facing warning. Never render raw provider errors: they can hold private data. */
+function failureNotice(
+  error: unknown,
+  timedOut: boolean,
+  maxTokens: number | undefined,
+  response: ModelResponse | undefined,
+): string {
+  const code = timedOut ? "timeout" : error instanceof NamingFailure ? error.code : "provider";
+
+  let stage: FailureStage = "validation";
+  if (maxTokens === undefined) {
+    stage = "preflight";
+  } else if (!response) {
+    stage = "request";
+  } else if (isProviderError(response)) {
+    stage = "provider-response";
+  }
+
+  const cause = stage === "provider-response" ? response?.errorMessage : error;
+  return `${FAILURE_MESSAGES[code]}\n${failureDiagnostics(stage, cause, maxTokens, response)}`;
+}
+
 /** Register the extension. The timeout override is for offline lifecycle tests. */
 export function registerRename(pi: ExtensionAPI, timeoutMs = 180_000): void {
   let state: State = { version: 1, attempted: false, titles: [] };
-  let sessionId: string | undefined;
   let eligible = false;
   let awaitingReply = false;
-  let serial = 0;
   let active: Request | undefined;
 
   const notify = (ctx: ExtensionContext, message: string, kind: "info" | "warning" = "info") => {
@@ -106,50 +231,42 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 180_000): void {
     }
   };
 
+  const setStatus = (ctx: ExtensionContext, text: string | undefined) => {
+    if (ctx.hasUI) {
+      ctx.ui.setStatus(STATUS_KEY, text);
+    }
+  };
+
   const save = () => pi.appendEntry(STATE_KEY, { ...state, titles: [...state.titles] });
 
   const cancel = () => {
-    serial++;
     if (active) {
       active.controller.abort();
-      if (active.ctx.hasUI) {
-        active.ctx.ui.setStatus(STATUS_KEY, undefined);
-      }
+      setStatus(active.ctx, undefined);
       active = undefined;
     }
   };
 
   const begin = (ctx: ExtensionContext): Request => {
     cancel();
-    const request = { id: serial, controller: new AbortController(), ctx };
-    active = request;
-    return request;
+    active = { controller: new AbortController(), ctx, timedOut: false };
+    return active;
   };
 
-  const valid = (request: Request) =>
-    active === request &&
-    request.id === serial &&
-    sessionId === request.ctx.sessionManager.getSessionId() &&
-    !request.controller.signal.aborted;
+  // Every cancellation path clears `active`, so identity alone tells whether a request is current.
+  const valid = (request: Request) => active === request && !request.controller.signal.aborted;
 
   const generate = async (request: Request): Promise<void> => {
-    const { ctx, controller } = request;
+    const { ctx } = request;
     const startingTitle = pi.getSessionName();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let releaseAbort: (() => void) | undefined;
-    let timedOut = false;
-    let stage: FailureStage = "preflight";
     let maxTokens: number | undefined;
-    let responseSummary: Parameters<typeof failureDiagnostics>[3];
-    let providerError: unknown;
+    let response: ModelResponse | undefined;
 
     try {
       if (!valid(request)) {
         return;
       }
-      if (ctx.hasUI) {
-        ctx.ui.setStatus(STATUS_KEY, "Renaming session...");
-      }
+      setStatus(ctx, "Renaming session...");
 
       const model = ctx.model;
       if (!model) {
@@ -161,115 +278,30 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 180_000): void {
 
       const context = titleContext(ctx, model, startingTitle, state.titles);
       maxTokens = context.maxTokens;
-
-      const aborted = new Promise<never>((_resolve, reject) => {
-        const listener = () => reject(new NamingFailure(timedOut ? "timeout" : "cancelled"));
-        controller.signal.addEventListener("abort", listener, { once: true });
-        releaseAbort = () => controller.signal.removeEventListener("abort", listener);
-      });
-      timer = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-      }, timeoutMs);
-
-      stage = "request";
-      const response = await Promise.race([
-        ctx.modelRegistry
-          .streamSimple(
-            model,
-            { messages: context.messages },
-            {
-              signal: controller.signal,
-              reasoning: "minimal",
-              maxTokens: context.maxTokens,
-              sessionId: ctx.sessionManager.getSessionId(),
-              // Keep cache affinity, but do not branch a live stateful WebSocket connection.
-              transport: "sse",
-            },
-          )
-          .result(),
-        aborted,
-      ]);
+      response = await callModel(request, model, context, timeoutMs);
 
       if (!valid(request) || pi.getSessionName() !== startingTitle) {
         return;
       }
-      responseSummary = response;
-      stage = "provider-response";
-      if (response.stopReason === "error" || response.stopReason === "aborted") {
-        providerError = response.errorMessage;
+      if (isProviderError(response)) {
         throw new NamingFailure("provider");
       }
-      stage = "validation";
-      if (
-        response.stopReason === "toolUse" ||
-        response.content.some((block) => block.type === "toolCall")
-      ) {
-        throw new NamingFailure("unexpected-tools");
-      }
-      if (response.stopReason === "length") {
-        throw new NamingFailure("incomplete-title");
-      }
-      const title = generatedTitle(textContent(response.content));
+      const title = titleFrom(response);
 
-      stage = "save";
       // Metadata is written before setting the name, whose change event cancels requests.
-      state.titles = [...state.titles, title].slice(-5);
+      state.titles = [...state.titles, title].slice(-HISTORY_SIZE);
       save();
       pi.setSessionName(title);
       notify(ctx, `Session named: ${title}`);
     } catch (error) {
-      // Never render raw provider errors: they can contain headers or private input.
-      if (
-        active !== request ||
-        request.id !== serial ||
-        sessionId !== ctx.sessionManager.getSessionId()
-      ) {
+      // Superseded or cancelled work is discarded silently. Timeouts still warn.
+      if (active !== request || (request.controller.signal.aborted && !request.timedOut)) {
         return;
       }
-      if (controller.signal.aborted && !timedOut) {
-        return;
-      }
-
-      const code =
-        error instanceof NamingFailure || (stage === "validation" && error instanceof Error)
-          ? error.message
-          : "provider";
-      const messages: Record<string, string> = {
-        "no-model": "No session model selected. Select a model, then run /rename.",
-        "no-auth":
-          "The selected model has no configured authentication. Sign in, then run /rename.",
-        "no-conversation":
-          "No conversation context is available to name. Use /rename <title> instead.",
-        "context-limit":
-          "The session needs more context space for a title request. Use /compact, then /rename, or supply a title.",
-        "unexpected-tools":
-          "The model requested tools instead of a title. No tools were executed. Run /rename again or supply a title.",
-        "incomplete-title":
-          "The model ran out of output space for a complete title. Run /rename again or supply a title.",
-        "invalid-title": "The model returned no usable title. Run /rename again or supply a title.",
-        timeout: "Session naming timed out. Run /rename to try again.",
-      };
-      const message = timedOut
-        ? messages.timeout!
-        : (messages[code] ?? "Session naming failed. Check model access, then run /rename again.");
-      const diagnostics = failureDiagnostics(
-        stage,
-        providerError ?? error,
-        maxTokens,
-        responseSummary,
-      );
-      notify(ctx, `${message}\n${diagnostics}`, "warning");
+      notify(ctx, failureNotice(error, request.timedOut, maxTokens, response), "warning");
     } finally {
-      if (timer) {
-        clearTimeout(timer);
-      }
-      releaseAbort?.();
-
       if (active === request) {
-        if (ctx.hasUI) {
-          ctx.ui.setStatus(STATUS_KEY, undefined);
-        }
+        setStatus(ctx, undefined);
         active = undefined;
       }
     }
@@ -277,7 +309,6 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 180_000): void {
 
   pi.on("session_start", (event, ctx) => {
     cancel();
-    sessionId = ctx.sessionManager.getSessionId();
     const entries = ctx.sessionManager.getBranch();
     state = restore(entries);
     const hasConversation = entries.some(
@@ -343,17 +374,14 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 180_000): void {
     eligible = false;
     awaitingReply = false;
     cancel();
-    sessionId = undefined;
   });
 
   pi.registerCommand("rename", {
     description: "Generate a specific session title, or set one with /rename <title>",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
-      let title: string;
-
-      try {
-        title = args.trim() ? literalTitle(args) : "";
-      } catch {
+      const isLiteral = args.trim() !== "";
+      const title = isLiteral ? literalTitle(args) : undefined;
+      if (isLiteral && !title) {
         notify(ctx, "A session title must be one line without control characters.", "warning");
         return;
       }
@@ -361,18 +389,17 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 180_000): void {
       eligible = false;
       awaitingReply = false;
       state.attempted = true;
-      const request = begin(ctx);
-      save();
 
       if (title) {
+        cancel();
+        save();
         pi.setSessionName(title);
         notify(ctx, `Session named: ${title}`);
-        if (active === request) {
-          cancel();
-        }
         return;
       }
 
+      const request = begin(ctx);
+      save();
       try {
         if (!ctx.isIdle()) {
           await ctx.waitForIdle();
@@ -381,6 +408,7 @@ export function registerRename(pi: ExtensionAPI, timeoutMs = 180_000): void {
           await generate(request);
         }
       } catch {
+        // generate() handles its own errors, so this is a failed idle wait.
         if (valid(request)) {
           notify(
             ctx,

@@ -59,6 +59,7 @@ type Call = {
 
 const instruction = (call: Call) => textContent(call.context.messages.at(-1)?.content);
 const requestText = (call: Call) => JSON.stringify(call.context.messages);
+const metadata = (call: Call) => JSON.parse(instruction(call).split("\n").at(-1)!);
 
 function fixture(timeout?: number) {
   const sm = SessionManager.inMemory("/sample-project");
@@ -271,17 +272,11 @@ test("whitespace generates; repeated requests use one call and accept the same t
   await f.rename("   ");
   await f.rename();
   assert.equal(f.calls.length, 2);
-  const input = JSON.parse(instruction(f.calls[1]!).split("\n").at(-1)!);
+  const input = metadata(f.calls[1]!);
   assert.equal(input.currentTitle, "Discovery: investigate duplicate registrations");
   assert.deepEqual(input.previousTitles, ["Discovery: investigate duplicate registrations"]);
   assert.equal(f.calls[0]!.model, f.ctx.model);
   assert.equal(f.calls[0]!.options.reasoning, "minimal");
-  assert.equal(f.calls[0]!.options.sessionId, f.sm.getSessionId());
-  assert.equal(f.calls[1]!.options.sessionId, f.sm.getSessionId());
-  assert.equal(f.calls[0]!.options.cacheRetention, undefined);
-  assert.equal(f.calls[0]!.options.transport, "sse");
-  assert.equal(f.calls[0]!.context.systemPrompt, undefined);
-  assert.match(instruction(f.calls[0]!), /whole-session theme/);
 });
 
 test("metadata and last five generated titles survive reload without auto naming", async () => {
@@ -300,12 +295,12 @@ test("metadata and last five generated titles survive reload without auto naming
   await f.firstReply();
   assert.equal(f.calls.length, 7);
   await f.rename();
-  const input = JSON.parse(instruction(f.calls.at(-1)!).split("\n").at(-1)!);
+  const input = metadata(f.calls.at(-1)!);
   assert.equal(input.previousTitles.length, 5);
   assert.match(input.previousTitles[0], /option 3$/);
 });
 
-test("provider failure is sanitized, preserves title, clears status, and never auto retries", async () => {
+test("automatic naming failure is not retried on later turns", async () => {
   const f = fixture();
   await f.start();
   f.setNext(async () => {
@@ -315,11 +310,58 @@ test("provider failure is sanitized, preserves title, clears status, and never a
   await f.firstReply();
   assert.equal(f.calls.length, 1);
   assert.equal(f.sm.getSessionName(), undefined);
-  assert.doesNotMatch(JSON.stringify(f.notices), /PRIVATE_PROVIDER_PAYLOAD/);
-  assert.equal(f.statuses.at(-1), undefined);
-  f.api.setSessionName("Existing title");
-  await f.rename();
-  assert.equal(f.sm.getSessionName(), "Existing title");
+  assert.match(f.notices.at(-1)!.text, /Session naming failed/);
+});
+
+test("failures keep the title, clear status, and hide private data", async (t) => {
+  const cases = {
+    model: /No session model selected/,
+    auth: /no configured authentication/,
+    conversation: /No conversation context/,
+    invalid: /no usable title/,
+    error: /Session naming failed/,
+    aborted: /Session naming failed/,
+    // A provider error string must not pass as an internal failure code.
+    impersonation: /Session naming failed/,
+  };
+  for (const [problem, expected] of Object.entries(cases)) {
+    await t.test(problem, async () => {
+      const f = fixture();
+      await f.start();
+      if (problem !== "conversation") {
+        f.user();
+        f.reply();
+      }
+      f.api.setSessionName("Keep title");
+      if (problem === "model") {
+        f.ctx.model = undefined;
+      }
+      if (problem === "auth") {
+        f.setAuth(false);
+      }
+      if (problem === "invalid") {
+        f.setNext(async () => assistant(""));
+      }
+      if (problem === "error" || problem === "aborted") {
+        f.setNext(async () => ({
+          ...assistant("PRIVATE_OUTPUT", problem),
+          errorMessage: "PRIVATE_ERROR",
+        }));
+      }
+      if (problem === "impersonation") {
+        f.setNext(async () => {
+          throw new Error("no-auth");
+        });
+      }
+      await f.rename();
+      const notice = f.notices.at(-1)!;
+      assert.equal(notice.kind, "warning");
+      assert.match(notice.text, expected);
+      assert.doesNotMatch(notice.text, /PRIVATE_/);
+      assert.equal(f.sm.getSessionName(), "Keep title");
+      assert.equal(f.statuses.at(-1), undefined);
+    });
+  }
 });
 
 test("failure diagnostics distinguish thrown requests from provider error responses", async (t) => {
@@ -328,7 +370,6 @@ test("failure diagnostics distinguish thrown requests from provider error respon
       const f = fixture();
       await f.start();
       f.user("PRIVATE_CONVERSATION");
-      f.api.setSessionName("Keep title");
       const message = "400 unsupported reasoning_effort: minimal PRIVATE_TOKEN";
       f.setNext(async () => {
         if (source === "request") {
@@ -338,14 +379,9 @@ test("failure diagnostics distinguish thrown requests from provider error respon
       });
       await f.rename();
       const warning = f.notices.at(-1)!.text;
-      assert.match(warning, new RegExp(`stage=${source}`));
-      assert.match(warning, /hint=reasoning-option/);
-      assert.match(warning, /http=400/);
-      assert.match(warning, /reasoning=minimal; maxTokens=256; transport=sse/);
+      assert.match(warning, new RegExp(`stage=${source}; hint=reasoning-option; http=400`));
+      assert.match(warning, /maxTokens=256/);
       assert.doesNotMatch(warning, /PRIVATE_|unsupported reasoning_effort/);
-      assert.equal(f.sm.getSessionName(), "Keep title");
-      assert.equal(f.calls.length, 1);
-      assert.equal(f.statuses.at(-1), undefined);
       assert.doesNotMatch(JSON.stringify(f.sm.getBranch()), /PRIVATE_TOKEN|PRIVATE_OUTPUT/);
     });
   }
@@ -362,8 +398,10 @@ test("length diagnostics report thinking without exposing generated content", as
   await f.rename();
   const warning = f.notices.at(-1)!.text;
   assert.match(warning, /ran out of output space/);
-  assert.match(warning, /stage=validation/);
-  assert.match(warning, /stop=length; textBlocks=0; thinkingBlocks=1/);
+  assert.match(
+    warning,
+    /stage=validation; maxTokens=256; stop=length; textBlocks=0; thinkingBlocks=1/,
+  );
   assert.doesNotMatch(warning, /PRIVATE_REASONING/);
 });
 
@@ -385,51 +423,6 @@ test("synchronous request failures get diagnostics and non-UI failures stay sile
   assert.deepEqual(f.notices, []);
   assert.deepEqual(f.statuses, []);
   assert.equal(f.calls.length, 2);
-});
-
-test("unknown provider errors cannot impersonate internal failures", async () => {
-  const f = fixture();
-  await f.start();
-  f.user();
-  f.setNext(async () => {
-    throw new Error("no-auth");
-  });
-  await f.rename();
-  const warning = f.notices.at(-1)!.text;
-  assert.match(warning, /Session naming failed/);
-  assert.match(warning, /stage=request; hint=unknown/);
-  assert.doesNotMatch(warning, /Sign in/);
-});
-
-test("missing model, auth, conversation, invalid output, and provider error are safe", async (t) => {
-  for (const problem of ["model", "auth", "conversation", "invalid", "error", "aborted"] as const) {
-    await t.test(problem, async () => {
-      const f = fixture();
-      await f.start();
-      if (problem !== "conversation") {
-        f.user();
-        f.reply();
-      }
-      f.api.setSessionName("Keep title");
-      if (problem === "model") {
-        f.ctx.model = undefined;
-      }
-      if (problem === "auth") {
-        f.setAuth(false);
-      }
-      if (problem === "invalid") {
-        f.setNext(async () => assistant(""));
-      }
-      if (problem === "error" || problem === "aborted") {
-        f.setNext(async () => assistant("PRIVATE_OUTPUT", problem));
-      }
-      await f.rename();
-      assert.equal(f.sm.getSessionName(), "Keep title");
-      assert.equal(f.notices.at(-1)?.kind, "warning");
-      assert.equal(f.statuses.at(-1), undefined);
-      assert.doesNotMatch(JSON.stringify(f.notices), /PRIVATE_OUTPUT/);
-    });
-  }
 });
 
 test("timeout preserves title even when provider ignores abort", async () => {
@@ -461,12 +454,7 @@ test("default naming deadline allows 180 seconds for slower models", async (t) =
   f.setNext(() => pending.promise);
   const run = f.rename();
 
-  t.mock.timers.tick(30_000);
-  await tick();
-  assert.equal(f.notices.length, 0);
-  assert.equal(f.calls[0]!.options.signal.aborted, false);
-
-  t.mock.timers.tick(149_999);
+  t.mock.timers.tick(179_999);
   await tick();
   assert.equal(f.calls[0]!.options.signal.aborted, false);
 
@@ -487,9 +475,8 @@ test("AI titles retain non-Latin text in the name and rename history", async () 
   assert.equal(f.sm.getSessionName(), title);
 
   await f.rename();
-  const metadata = JSON.parse(instruction(f.calls[1]!).split("\n").at(-1)!);
-  assert.equal(metadata.currentTitle, title);
-  assert.deepEqual(metadata.previousTitles, [title]);
+  assert.equal(metadata(f.calls[1]!).currentTitle, title);
+  assert.deepEqual(metadata(f.calls[1]!).previousTitles, [title]);
 });
 
 test("newest request wins and manual naming invalidates pending work", async () => {
@@ -690,7 +677,7 @@ test("continuation preserves the complete structured prefix including system pat
   assert.equal(call.options.transport, "sse");
 });
 
-test("conversations beyond 24k characters are sent whole without sampling or flattening", async () => {
+test("long contexts are sent whole", async () => {
   const f = fixture();
   await f.start();
   const content = `OPENING ${"x".repeat(40_000)} IMPORTANT_MIDDLE ${"y".repeat(40_000)} ENDING`;
@@ -700,8 +687,6 @@ test("conversations beyond 24k characters are sent whole without sampling or fla
 
   const original = f.calls[0]!.context.messages.find((message) => message.role === "user");
   assert.equal(original?.content, content);
-  assert.match(requestText(f.calls[0]!), /IMPORTANT_MIDDLE/);
-  assert.doesNotMatch(requestText(f.calls[0]!), /Conversation text omitted/);
 });
 
 test("provider normalization cannot mutate live session messages", async () => {
@@ -745,7 +730,7 @@ test("model context budget failure preserves title and does not compact or trunc
   assert.equal(f.statuses.at(-1), undefined);
 });
 
-test("unknown context usage falls back to Pi's estimate instead of a character cap", async () => {
+test("unknown context usage falls back to Pi's token estimate", async () => {
   const f = fixture();
   await f.start();
   f.user("A long input ".repeat(500));

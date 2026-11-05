@@ -15,7 +15,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
-test("real Pi session and naming request share a structured prefix and cache identity offline", async () => {
+test("real Pi loads the extension; session and naming request share a prefix and cache identity", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-rename2-continuation-"));
   let dispose: (() => void) | undefined;
 
@@ -87,7 +87,13 @@ test("real Pi session and naming request share a structured prefix and cache ide
       noContextFiles: true,
     });
     await loader.reload();
-    assert.deepEqual(loader.getExtensions().errors, []);
+    const loaded = loader.getExtensions();
+    assert.deepEqual(loaded.errors, []);
+    assert.deepEqual(loaded.warnings ?? [], []);
+    const extension = loaded.extensions.find((value) => value.commands.has("rename"));
+    assert.ok(extension);
+    assert.deepEqual([...extension.commands.keys()], ["rename"]);
+    assert.equal(extension.tools.size, 0);
     const sm = SessionManager.inMemory(directory);
     const { session } = await createAgentSession({
       cwd: directory,

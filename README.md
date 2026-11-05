@@ -76,35 +76,23 @@ The temporary title instruction and reply are not saved in the conversation. Onl
 
 Naming consumes model quota and is not included in Pi's main token totals. Main-request-only redaction or filter hooks are not replayed; do not rely on them to sanitize naming requests.
 
-### Prompt-cache reuse
-
-The extension preserves the structured message prefix and session cache identity, appending a title instruction. It uses the provider's normal cache policy and a separate SSE request where supported.
-
-Cache hits are not guaranteed. Provider support, expiry, routing, reasoning settings, and request-time changes can prevent reuse. A cold cache processes the full context.
+Naming reuses the session's message prefix and cache identity, so providers with prompt caching can often reuse cached input. Cache hits are not guaranteed.
 
 ## Failure handling
 
-The naming request has a 180-second deadline. Timeouts, unavailable credentials, insufficient context space, provider errors, tool requests, and incomplete or unusable titles leave the old title intact. Warnings include a privacy-safe diagnostic summary, not raw provider responses. The transient status is cleared when work finishes or is cancelled.
-
-The summary reports the failure stage (`preflight`, `request`, `provider-response`, `validation`, or `save`). After preflight succeeds, it also reports the requested reasoning level, output limit, and transport. When a response is available, it includes the stop reason and counts of text and thinking blocks. These are extension-level settings, not a capture of the final HTTP payload; Pi may map them for the selected provider.
-
-Request exceptions and provider error responses include a fixed error hint and an HTTP error status when available. Hints cover reasoning options, context limits, chat templates, authentication, rate limits, connection errors, and server errors. Hints are based on error patterns, not confirmed root causes. Unknown errors stay `hint=unknown`; check the server log for the exact error.
-
-For example, an error mentioning an unsupported reasoning option may produce:
+Naming has a 180-second deadline. On any failure the old title stays, and a warning ends with a short diagnostic line. For example:
 
 ```text
-Rename diagnostics: stage=provider-response; hint=reasoning-option; http=400; reasoning=minimal; maxTokens=256; transport=sse; stop=error; textBlocks=0; thinkingBlocks=0.
+Rename diagnostics: stage=provider-response; hint=reasoning-option; http=400; maxTokens=256; stop=error; textBlocks=0; thinkingBlocks=0.
 ```
 
-Diagnostics do not display or save raw errors, credentials, headers, endpoint URLs, model identifiers, conversation excerpts, or generated text/reasoning. No diagnostic files or extra session entries are written.
+`stage` shows where it failed (`preflight`, `request`, `provider-response`, or `validation`). `hint` is a pattern-based guess such as `authentication`, `rate-limit`, `context-limit`, `connection`, or `reasoning-option`; `unknown` means check the server log. Diagnostics never include raw errors, credentials, URLs, model names, or conversation text, and nothing extra is written to disk.
 
 If naming fails:
 
 1. Check that a model is selected and works in the main session.
 2. Resolve sign-in or provider access through Pi's normal controls.
 3. Run `/rename`, or use `/rename <title>` without a model call.
-
-An empty conversation cannot be named from context. Literal titles still work without a model request or available context space.
 
 ## Development
 
@@ -117,20 +105,11 @@ npm run check
 
 Tests use synthetic conversations and mocked model responses, including Pi session and cache-prefix checks. They do not read your personal settings or contact providers.
 
-The implementation has three small parts:
-
-- `src/naming.ts`: title instructions and validation.
-- `src/extension.ts`: context snapshots, Pi commands, lifecycle hooks, and persistence.
-- `src/diagnostics.ts`: privacy-safe failure summaries and error hints.
+See [SPEC.md](SPEC.md) for the full behavior contract and module layout.
 
 CI runs the same checks on Node.js 22 and 24. It does not publish packages or need provider secrets.
 
-## Release checklist
-
-1. Run `npm ci --ignore-scripts` and `npm run check`.
-2. Update the version and lockfile, and review the source and documentation.
-3. Run `npm pack --dry-run --ignore-scripts` and inspect the package contents.
-4. Publish with `npm publish --access public --ignore-scripts` and create the matching release tag.
+Maintainers: see [RELEASING.md](RELEASING.md).
 
 ## License
 

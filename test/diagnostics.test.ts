@@ -36,7 +36,7 @@ test("diagnostic summaries allowlist stop reasons and omit arbitrary response fi
   });
   assert.equal(
     summary,
-    "Rename diagnostics: stage=provider-response; hint=unknown; reasoning=minimal; maxTokens=256; transport=sse; stop=unknown; textBlocks=1; thinkingBlocks=1.",
+    "Rename diagnostics: stage=provider-response; hint=unknown; maxTokens=256; stop=unknown; textBlocks=1; thinkingBlocks=1.",
   );
   assert.equal(
     failureDiagnostics("preflight", new Error("PRIVATE_ERROR"), undefined, undefined),

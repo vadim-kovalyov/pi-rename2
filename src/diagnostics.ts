@@ -1,6 +1,6 @@
-export type FailureStage = "preflight" | "request" | "provider-response" | "validation" | "save";
+export type FailureStage = "preflight" | "request" | "provider-response" | "validation";
 
-interface ResponseSummary {
+export interface ResponseSummary {
   stopReason: string;
   content: readonly { type: string }[];
 }
@@ -83,7 +83,7 @@ export function failureDiagnostics(
     }
   }
   if (maxTokens !== undefined) {
-    fields.push("reasoning=minimal", `maxTokens=${maxTokens}`, "transport=sse");
+    fields.push(`maxTokens=${maxTokens}`);
   }
   if (response) {
     const stop = ["stop", "length", "toolUse", "error", "aborted"].includes(response.stopReason)

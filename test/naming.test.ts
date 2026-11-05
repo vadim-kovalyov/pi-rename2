@@ -17,24 +17,21 @@ test("text extraction includes only visible response text", () => {
   );
 });
 
-test("temporary instruction requests only a specific whole-session title and treats metadata as data", () => {
+test("naming prompt forbids tools and ends with untrusted metadata", () => {
   const prompt = namingPrompt(
     "Retry investigation",
     ["one", "two", "three", "four", "five", "six"],
     "sample-project",
   );
-  const input = JSON.parse(prompt.split("\n").at(-1)!);
-  assert.deepEqual(input.previousTitles, ["two", "three", "four", "five", "six"]);
-  assert.equal(input.currentTitle, "Retry investigation");
-  assert.match(prompt, /whole-session theme/);
-  assert.match(prompt, /meaningfully different/);
-  assert.match(prompt, /untrusted data/);
-  assert.match(prompt, /Do not invent identifiers or claim a fix/);
+  const lines = prompt.split("\n");
+  assert.deepEqual(JSON.parse(lines.at(-1)!), {
+    directoryHint: "sample-project",
+    currentTitle: "Retry investigation",
+    previousTitles: ["two", "three", "four", "five", "six"],
+  });
+  assert.match(lines.at(-2)!, /untrusted data/);
   assert.match(prompt, /Do not use tools/);
-  assert.match(prompt, /instead of continuing its work/);
-  assert.match(prompt, /main language used by the session/);
-  assert.match(prompt, /mixed-language sessions/);
-  assert.doesNotMatch(prompt, /English|ASCII/);
+  assert.equal(JSON.parse(namingPrompt(undefined, [], "x").split("\n").at(-1)!).currentTitle, null);
 });
 
 test("generated titles normalize quotes, whitespace, controls, and length", () => {
@@ -48,10 +45,19 @@ test("generated titles normalize quotes, whitespace, controls, and length", () =
   );
   assert.equal(generatedTitle("Cafe\u0301"), "Caf\u00e9");
   assert.equal(generatedTitle("Retry \u202eownership\u202c"), "Retry ownership");
-  assert.ok(generatedTitle(`Investigate ${"worker cancellation ".repeat(20)}`).length <= 80);
-  assert.equal(generatedTitle("x".repeat(100)).length, 80);
-  assert.throws(() => generatedTitle("\u001b\u0000"), /invalid-title/);
-  assert.throws(() => generatedTitle("---"), /invalid-title/);
+  assert.equal(generatedTitle("x".repeat(100))?.length, 80);
+  assert.equal(generatedTitle("\u001b\u0000"), undefined);
+  assert.equal(generatedTitle("---"), undefined);
+});
+
+test("long generated titles clip at a word boundary", () => {
+  assert.equal(
+    generatedTitle(
+      "Investigating Duplicate Device Registrations and Retry Ownership Across Reconnecting Workers",
+    ),
+    "Investigating Duplicate Device Registrations and Retry Ownership Across",
+  );
+  assert.equal(generatedTitle(`${"a".repeat(70)} - ${"b".repeat(20)}`), "a".repeat(70));
 });
 
 test("generated titles preserve the session language and count Unicode code points", () => {
@@ -64,33 +70,21 @@ test("generated titles preserve the session language and count Unicode code poin
     assert.equal(generatedTitle(title), title);
   }
 
-  const clipped = generatedTitle("\u{10400}".repeat(100));
-  assert.equal(Array.from(clipped).length, 80);
-  assert.equal(clipped, "\u{10400}".repeat(80));
-  assert.equal(Array.from(generatedTitle("\u6ce8".repeat(100))).length, 80);
-});
-
-test("clipped generated titles do not end in a dangling connector", () => {
-  const title = generatedTitle(
-    "Investigating Duplicate Device Registrations and Retry Ownership Across Reconnecting Workers",
-  );
-  assert.equal(title, "Investigating Duplicate Device Registrations and Retry Ownership");
-  assert.equal(
-    generatedTitle("Compare retries across reconnects"),
-    "Compare retries across reconnects",
-  );
+  assert.equal(generatedTitle("\u{10400}".repeat(100)), "\u{10400}".repeat(80));
+  assert.equal(Array.from(generatedTitle("\u6ce8".repeat(100))!).length, 80);
 });
 
 test("literal titles preserve wording and length but reject controls", () => {
   assert.equal(literalTitle("  My exact title  "), "My exact title");
-  assert.equal(literalTitle("x".repeat(120)).length, 120);
+  assert.equal(literalTitle("x".repeat(120))?.length, 120);
   for (const title of [
     "two\nlines",
     "tab\there",
     "escape\u001b[31m",
     "delete\u007f",
     "break\u2028line",
+    "bidi\u202eoverride",
   ]) {
-    assert.throws(() => literalTitle(title), /invalid-literal/);
+    assert.equal(literalTitle(title), undefined);
   }
 });
