@@ -160,7 +160,9 @@ async function callModel(
       { messages: context.messages },
       {
         signal: controller.signal,
-        reasoning: "off",
+        // Omitted reasoning means "thinking off", the same convention Pi's agent loop
+        // uses. Whether the provider receives a no-thinking signal depends on the
+        // model's thinking format or thinkingLevelMap (e.g. thinkingLevelMap.off).
         maxTokens: context.maxTokens,
         sessionId: ctx.sessionManager.getSessionId(),
         // Keep cache affinity, but do not branch a live stateful WebSocket connection.
