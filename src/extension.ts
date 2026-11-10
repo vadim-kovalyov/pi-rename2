@@ -160,7 +160,7 @@ async function callModel(
       { messages: context.messages },
       {
         signal: controller.signal,
-        reasoning: "minimal",
+        reasoning: "off",
         maxTokens: context.maxTokens,
         sessionId: ctx.sessionManager.getSessionId(),
         // Keep cache affinity, but do not branch a live stateful WebSocket connection.

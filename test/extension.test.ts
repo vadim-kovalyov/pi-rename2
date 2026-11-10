@@ -276,7 +276,7 @@ test("whitespace generates; repeated requests use one call and accept the same t
   assert.equal(input.currentTitle, "Discovery: investigate duplicate registrations");
   assert.deepEqual(input.previousTitles, ["Discovery: investigate duplicate registrations"]);
   assert.equal(f.calls[0]!.model, f.ctx.model);
-  assert.equal(f.calls[0]!.options.reasoning, "minimal");
+  assert.equal(f.calls[0]!.options.reasoning, "off");
 });
 
 test("metadata and last five generated titles survive reload without auto naming", async () => {

@@ -163,7 +163,7 @@ Call `ctx.modelRegistry.streamSimple(model, {messages}, options).result()` once,
 ```typescript
 {
   signal: requestAbortController.signal,
-  reasoning: "minimal",
+  reasoning: "off",
   maxTokens: outputLimit,
   sessionId: ctx.sessionManager.getSessionId(),
   transport: "sse"
@@ -172,7 +172,7 @@ Call `ctx.modelRegistry.streamSimple(model, {messages}, options).result()` once,
 
 Leave `cacheRetention`, tool choice, and provider-specific request fields unspecified. Use the selected model and existing host authentication/routing; there is no fallback model/provider, custom retry loop, credential repair, or cache warming by the extension. Provider internals retain their own behavior.
 
-Keeping the transcript prefix and session identity allows prompt-cache reuse. SSE avoids branching a shared stateful WebSocket connection where the provider honors transport selection. Cache hits are not guaranteed: expiry, routing, provider support, minimal reasoning, and request-time transformations can affect reuse. A cold request processes the full context. Cached input can still consume quota/cost.
+Keeping the transcript prefix and session identity allows prompt-cache reuse. SSE avoids branching a shared stateful WebSocket connection where the provider honors transport selection. Reasoning is off: naming needs no thinking, and some local models (e.g. llama.cpp) reject effort levels beyond a small supported set. Cache hits are not guaranteed: expiry, routing, provider support, and request-time transformations can affect reuse. A cold request processes the full context. Cached input can still consume quota/cost.
 
 Tool schemas stay in the prefix. This is a direct inference call with no tool executor or agent loop. Tools requested in its response are never executed.
 
